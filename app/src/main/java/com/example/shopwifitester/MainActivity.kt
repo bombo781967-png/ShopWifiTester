@@ -181,60 +181,56 @@ fun ProfessionalWifiScreen() {
 
     fun addLog(msg: String) {
         val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-        eventLogs.add(0, "$time  \vert{}$msg")
+        eventLogs.add(0, "$time  |  $msg")
         if (eventLogs.size > 100) eventLogs.removeAt(eventLogs.lastIndex)
     }
 
     fun buildReportBody(): String {
         val timestamp = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
-        val bandLabel = if (freq == 0) "N/D" else if (freq < 3000) "2.4 GHz (\$freq MHz)" else "5 GHz (\$freq MHz)"
-        val cpLat = if (checkpointState.isReachable && checkpointState.latencyMs != null) "\${checkpointState.latencyMs} ms" else "OFFLINE"
-        val cpJit = if (checkpointState.jitterMs != null) "\${checkpointState.jitterMs} ms" else "--"
-        val ioLat = if (itemOptixState.isReachable && itemOptixState.latencyMs != null) "\${itemOptixState.latencyMs} ms" else "OFFLINE"
-        val ioJit = if (itemOptixState.jitterMs != null) "\${itemOptixState.jitterMs} ms" else "--"
+        val bandLabel = if (freq == 0) "N/D" else if (freq < 3000) "2.4 GHz ($freq MHz)" else "5 GHz ($freq MHz)"
+        val cpLat = if (checkpointState.isReachable && checkpointState.latencyMs != null) "${checkpointState.latencyMs} ms" else "OFFLINE"
+        val cpJit = if (checkpointState.jitterMs != null) "${checkpointState.jitterMs} ms" else "--"
+        val ioLat = if (itemOptixState.isReachable && itemOptixState.latencyMs != null) "${itemOptixState.latencyMs} ms" else "OFFLINE"
+        val ioJit = if (itemOptixState.jitterMs != null) "${itemOptixState.jitterMs} ms" else "--"
 
-        val warningsText = if (channelWarnings.isEmpty()) {
-            "Scansione canali non ancora eseguita"
+        val sb = StringBuilder()
+        sb.appendLine("REPORT DIAGNOSTICA WI-FI PUNTO VENDITA")
+        sb.appendLine("Data e ora rilievo: $timestamp")
+        sb.appendLine()
+        sb.appendLine("1. CONNESSIONE E SEGNALE ATTIVO")
+        sb.appendLine("- SSID utilizzato: $ssid")
+        sb.appendLine("- Access Point (BSSID): $bssid")
+        sb.appendLine("- Intensità segnale (RSSI): $rssi dBm")
+        sb.appendLine("- Canale / Banda: Ch ${freqToChannel(freq)} - $bandLabel")
+        sb.appendLine("- Velocità Link: $linkSpeed Mbps")
+        sb.appendLine()
+        sb.appendLine("2. ROAMING E STABILITÀ RETE LOCALE")
+        sb.appendLine("- Roaming effettuati (cambi AP): $roamingCount")
+        sb.appendLine("- Ping Gateway ($gatewayIp): $pingMs")
+        sb.appendLine("- Pacchetti persi: $packetLossCount")
+        sb.appendLine()
+        sb.appendLine("3. PRESTAZIONI SERVIZI CLOUD (LATENZA E JITTER)")
+        sb.appendLine("- *.checkpointsystems.com (IO Portal - ${checkpointState.activeHost}): Latenza $cpLat | Jitter $cpJit")
+        sb.appendLine("- *.itemoptix.com (IO Portal / IO Mobile - ${itemOptixState.activeHost}): Latenza $ioLat | Jitter $ioJit")
+        sb.appendLine()
+        sb.appendLine("4. ANALISI SOVRAPPOSIZIONE CANALI")
+        if (channelWarnings.isEmpty()) {
+            sb.appendLine("Scansione canali non ancora eseguita")
         } else {
-            channelWarnings.joinToString("\n") { "- \${it.message}" }
+            channelWarnings.forEach { sb.appendLine("- ${it.message}") }
         }
-
-        val logsText = if (eventLogs.isEmpty()) {
-            "Nessun evento di roaming o disconnessione registrato"
+        sb.appendLine()
+        sb.appendLine("5. LOG EVENTI E ROAMING (ULTIMI 25)")
+        if (eventLogs.isEmpty()) {
+            sb.appendLine("Nessun evento di roaming o disconnessione registrato")
         } else {
-            eventLogs.take(25).joinToString("\n")
+            eventLogs.take(25).forEach { sb.appendLine(it) }
         }
-
-        return """
-REPORT DIAGNOSTICA WI-FI PUNTO VENDITA
-Data e ora rilievo: \$timestamp
-
-1. CONNESSIONE E SEGNALE ATTIVO
-- SSID utilizzato: \$ssid
-- Access Point (BSSID): \$bssid
-- Intensità segnale (RSSI): \$rssi dBm
-- Canale / Banda: Ch ${freqToChannel(freq)} -$bandLabel
-- Velocità Link: \$linkSpeed Mbps
-
-2. ROAMING E STABILITÀ RETE LOCALE
-- Roaming effettuati (cambi AP): \$roamingCount
-- Ping Gateway ($gatewayIp):$pingMs
-- Pacchetti persi: \$packetLossCount
-
-3. PRESTAZIONI SERVIZI CLOUD (LATENZA E JITTER)
-- *.checkpointsystems.com (IO Portal - \${checkpointState.activeHost}): Latenza $cpLat \vert{} Jitter$cpJit
-- *.itemoptix.com (IO Portal / IO Mobile - \${itemOptixState.activeHost}): Latenza $ioLat \vert{} Jitter$ioJit
-
-4. ANALISI SOVRAPPOSIZIONE CANALI
-\$warningsText
-
-5. LOG EVENTI E ROAMING (ULTIMI 25)
-\$logsText
-        """.trimIndent()
+        return sb.toString()
     }
 
     fun sendEmailReport(targetEmail: String) {
-        val subject = "Report Diagnostica Wi-Fi Negozio - SSID: \$ssid"
+        val subject = "Report Diagnostica Wi-Fi Negozio - SSID: $ssid"
         val body = buildReportBody()
         val intent = Intent(Intent.ACTION_SENDTO).apply {
             data = Uri.parse("mailto:")
@@ -268,12 +264,12 @@ Data e ora rilievo: \$timestamp
                     }
                     if (lastBssid != null && lastBssid != currentBssid) {
                         roamingCount++
-                        val elapsed = if (disconnectStart > 0) "\${System.currentTimeMillis() - disconnectStart} ms" else "Fast Roaming (<200ms)"
-                        addLog("ROAMING #\$roamingCount ($ssid):$lastBssid → $currentBssid ($elapsed)")
+                        val elapsed = if (disconnectStart > 0) "${System.currentTimeMillis() - disconnectStart} ms" else "Fast Roaming (<200ms)"
+                        addLog("ROAMING #$roamingCount ($ssid): $lastBssid -> $currentBssid ($elapsed)")
                         disconnectStart = 0L
                     } else if (disconnectStart > 0) {
                         val elapsed = System.currentTimeMillis() - disconnectStart
-                        addLog("RICONNESSO allo stesso AP (\${elapsed} ms)")
+                        addLog("RICONNESSO allo stesso AP (${elapsed} ms)")
                         disconnectStart = 0L
                     }
                     lastBssid = currentBssid
@@ -348,11 +344,11 @@ Data e ora rilievo: \$timestamp
                     val elapsed = System.currentTimeMillis() - start
                     withContext(Dispatchers.Main) {
                         if (reachable) {
-                            pingMs = "\${elapsed} ms"
+                            pingMs = "${elapsed} ms"
                         } else {
                             pingMs = "TIMEOUT"
                             packetLossCount++
-                            addLog("PACKET LOSS verso $gatewayIp (Tot:$packetLossCount)")
+                            addLog("PACKET LOSS verso $gatewayIp (Tot: $packetLossCount)")
                         }
                     }
                 } catch (e: Exception) {
@@ -428,7 +424,7 @@ Data e ora rilievo: \$timestamp
                         if (abs(a.channel - b.channel) < 5) {
                             warnings.add(
                                 ChannelOverlapWarning(
-                                    "Conflitto 2.4GHz: '${a.ssid}' (Ch${a.channel}) ↔ '${b.ssid}' (Ch${b.channel})",
+                                    "Conflitto 2.4GHz: '${a.ssid}' (Ch ${a.channel}) - '${b.ssid}' (Ch ${b.channel})",
                                     a.channel == b.channel
                                 )
                             )
@@ -551,3 +547,367 @@ Data e ora rilievo: \$timestamp
                     .border(1.dp, CardBorder, RoundedCornerShape(16.dp))
             ) {
                 Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    SignalGauge(rssi = rssi, color = statusColor, label = qualityLabel)
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "SSID: $ssid  •  AP: $bssid",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    if (rssiHistory.size > 2) {
+                        Spacer(Modifier.height(14.dp))
+                        SignalSparkline(history = rssiHistory, lineColor = statusColor)
+                    }
+                }
+            }
+        }
+
+        // Griglia KPI (Roaming + Rete Locale)
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    KpiTile(
+                        title = "ROAMING EFFETTUATI",
+                        value = "$roamingCount",
+                        subtitle = "Cambi AP rilevati",
+                        valueColor = AccentBlue,
+                        modifier = Modifier.weight(1f)
+                    )
+                    KpiTile(
+                        title = "CANALE / BANDA",
+                        value = "Ch ${freqToChannel(freq)}",
+                        subtitle = if (freq < 3000) "2.4 GHz ($freq MHz)" else "5 GHz ($freq MHz)",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    KpiTile(
+                        title = "PING GATEWAY",
+                        value = pingMs,
+                        subtitle = gatewayIp,
+                        valueColor = if (pingMs == "TIMEOUT") StatusRed else StatusGreen,
+                        modifier = Modifier.weight(1f)
+                    )
+                    KpiTile(
+                        title = "LINK / PERSI",
+                        value = "$linkSpeed Mbps",
+                        subtitle = "Pacchetti persi: $packetLossCount",
+                        valueColor = if (packetLossCount > 0) StatusRed else TextPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        // Sezione Ping Domini Cloud (Checkpoint & ItemOptix)
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "LATENZA & JITTER SERVIZI CLOUD",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+                EndpointProbeCard(state = checkpointState)
+                EndpointProbeCard(state = itemOptixState)
+            }
+        }
+
+        // Pulsanti Azione: Scansione Spettro + Invio Report Email
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = { runChannelScan() },
+                    enabled = !isScanning,
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentBlue, contentColor = BgDark),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(50.dp)
+                ) {
+                    Text(
+                        if (isScanning) "SCANSIONE SPETTRO IN CORSO..." else "ANALIZZA SOVRAPPOSIZIONE CANALI",
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                }
+
+                Button(
+                    onClick = { showEmailDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = StatusGreen, contentColor = BgDark),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(50.dp)
+                ) {
+                    Text(
+                        "INVIA REPORT TEST VIA EMAIL",
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                }
+            }
+        }
+
+        // Avvisi Sovrapposizioni
+        if (channelWarnings.isNotEmpty()) {
+            items(channelWarnings) { warn ->
+                val bg = if (warn.isCritical) StatusRed.copy(alpha = 0.15f) else StatusGreen.copy(alpha = 0.15f)
+                val border = if (warn.isCritical) StatusRed else StatusGreen
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(bg)
+                        .border(1.dp, border.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                        .padding(14.dp)
+                ) {
+                    Text(warn.message, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+
+        // Lista Reti Rilevate
+        if (scannedNetworks.isNotEmpty()) {
+            item {
+                Text("RETI VICINE RILEVATE (${scannedNetworks.size})", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            }
+            items(scannedNetworks.take(8)) { net ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(CardDark)
+                        .border(1.dp, CardBorder, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(net.ssid, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Canale ${net.channel} • ${net.band}", color = TextSecondary, fontSize = 12.sp)
+                    }
+                    Text(
+                        "${net.rssi} dBm",
+                        color = if (net.rssi >= -65) StatusGreen else if (net.rssi >= -78) StatusAmber else TextSecondary,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+
+        // Log Roaming
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("LOG ROAMING ($roamingCount) & EVENTI", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                TextButton(onClick = { eventLogs.clear(); packetLossCount = 0; roamingCount = 0 }) {
+                    Text("AZZERA", color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        if (eventLogs.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(CardDark)
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Cammina per il negozio per rilevare cambi AP e cadute", color = TextSecondary, fontSize = 12.sp)
+                }
+            }
+        } else {
+            items(eventLogs) { log ->
+                val isError = log.contains("DISCONNESSIONE") || log.contains("LOSS")
+                Text(
+                    log,
+                    color = if (isError) StatusRed else TextPrimary,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(CardDark)
+                        .padding(10.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun EndpointProbeCard(state: EndpointProbeState) {
+    val latencyColor = when {
+        !state.isReachable || state.latencyMs == null -> StatusRed
+        state.latencyMs <= 60 -> StatusGreen
+        state.latencyMs <= 150 -> StatusAmber
+        else -> StatusRed
+    }
+    val jitterColor = when {
+        state.jitterMs == null -> TextSecondary
+        state.jitterMs <= 15 -> StatusGreen
+        state.jitterMs <= 40 -> StatusAmber
+        else -> StatusRed
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardDark),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, CardBorder, RoundedCornerShape(14.dp))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(state.title, color = AccentBlue, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Text(state.subtitle, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    Text("Host: ${state.activeHost}", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("LATENZA", color = TextSecondary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (state.isReachable && state.latencyMs != null) "${state.latencyMs} ms" else "OFFLINE",
+                            color = latencyColor,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("JITTER", color = TextSecondary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (state.jitterMs != null) "${state.jitterMs} ms" else "--",
+                            color = jitterColor,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun probeDomainCandidates(candidates: List<String>): Pair<String, Long>? {
+    for (host in candidates) {
+        val rtt = measureTcpRtt(host, 443, 1200)
+        if (rtt != null) return Pair(host, rtt)
+    }
+    return null
+}
+
+fun measureTcpRtt(host: String, port: Int, timeoutMs: Int): Long? {
+    return try {
+        Socket().use { socket ->
+            val start = System.nanoTime()
+            socket.connect(InetSocketAddress(host, port), timeoutMs)
+            (System.nanoTime() - start) / 1_000_000L
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+fun calculateJitter(samples: ArrayDeque<Long>): Long {
+    if (samples.size < 2) return 0L
+    val list = samples.toList()
+    var diffSum = 0L
+    for (i in 1 until list.size) {
+        diffSum += abs(list[i] - list[i - 1])
+    }
+    return diffSum / (list.size - 1)
+}
+
+@Composable
+fun SignalGauge(rssi: Int, color: Color, label: String) {
+    val normalized = ((rssi.coerceIn(-95, -35) + 95) / 60f)
+    val animatedProgress by animateFloatAsState(targetValue = normalized, animationSpec = tween(400), label = "gauge")
+
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(180.dp)) {
+        Canvas(modifier = Modifier.fillMaxSize().padding(10.dp)) {
+            val stroke = 14.dp.toPx()
+            drawArc(
+                color = CardBorder,
+                startAngle = 140f,
+                sweepAngle = 260f,
+                useCenter = false,
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
+                size = Size(size.width, size.height)
+            )
+            drawArc(
+                color = color,
+                startAngle = 140f,
+                sweepAngle = 260f * animatedProgress,
+                useCenter = false,
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
+                size = Size(size.width, size.height)
+            )
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("$rssi", color = TextPrimary, fontSize = 42.sp, fontWeight = FontWeight.ExtraBold)
+            Text("dBm", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+        }
+    }
+}
+
+@Composable
+fun SignalSparkline(history: List<Int>, lineColor: Color) {
+    Canvas(modifier = Modifier.fillMaxWidth().height(48.dp)) {
+        if (history.size < 2) return@Canvas
+        val stepX = size.width / (history.size - 1)
+        val path = Path()
+        history.forEachIndexed { index, value ->
+            val normY = ((value.coerceIn(-95, -35) + 95) / 60f)
+            val x = index * stepX
+            val y = size.height - (normY * size.height)
+            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(
+            path = path,
+            color = lineColor,
+            style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
+        )
+    }
+}
+
+@Composable
+fun KpiTile(title: String, value: String, subtitle: String, modifier: Modifier = Modifier, valueColor: Color = TextPrimary) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardDark),
+        shape = RoundedCornerShape(14.dp),
+        modifier = modifier.border(1.dp, CardBorder, RoundedCornerShape(14.dp))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(title, color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(value, color = valueColor, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+            Text(subtitle, color = TextSecondary, fontSize = 11.sp, maxLines = 1)
+        }
+    }
+}
+
+fun freqToChannel(freq: Int): Int = when (freq) {
+    in 2412..2484 -> (freq - 2407) / 5
+    in 5170..5825 -> (freq - 5000) / 5
+    in 5955..7115 -> (freq - 5950) / 5
+    else -> 0
+}
