@@ -11,6 +11,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
+import android.net.wifi.ScanResult
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -50,10 +51,13 @@ import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.abs
@@ -79,6 +83,7 @@ data class EndpointProbeState(
     val activeHost: String,
     val latencyMs: Long? = null,
     val jitterMs: Long? = null,
+    val dnsMs: Long? = null,
     val isReachable: Boolean = false
 )
 
@@ -98,6 +103,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ProfessionalWifiScreen() {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
     var hasPermissions by remember {
         mutableStateOf(
             ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -123,7 +130,7 @@ fun ProfessionalWifiScreen() {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
                 Text("Permessi Richiesti", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
-                Text("Android richiede l'accesso alla posizione per leggere SSID, canali Wi-Fi e Access Point.", color = TextSecondary, fontSize = 14.sp)
+                Text("Android richiede l'accesso alla posizione per leggere SSID, standard Wi-Fi e Access Point.", color = TextSecondary, fontSize = 14.sp)
                 Spacer(Modifier.height(20.dp))
                 Button(
                     onClick = { permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)) },
@@ -139,14 +146,21 @@ fun ProfessionalWifiScreen() {
     // Stati diagnostica Wi-Fi
     var ssid by remember { mutableStateOf("Rilevamento SSID...") }
     var bssid by remember { mutableStateOf("00:00:00:00:00:00") }
+    var apVendor by remember { mutableStateOf("Rilevamento AP...") }
+    var wifiStandard by remember { mutableStateOf("Wi-Fi") }
     var rssi by remember { mutableIntStateOf(-90) }
     var freq by remember { mutableIntStateOf(0) }
     var linkSpeed by remember { mutableIntStateOf(0) }
     var gatewayIp by remember { mutableStateOf("192.168.1.1") }
     var pingMs by remember { mutableStateOf("--") }
+    var totalPings by remember { mutableIntStateOf(0) }
     var packetLossCount by remember { mutableIntStateOf(0) }
     var roamingCount by remember { mutableIntStateOf(0) }
     var isScanning by remember { mutableStateOf(false) }
+
+    // Speed test reale HTTP
+    var downloadMbps by remember { mutableStateOf("--") }
+    var isTestingSpeed by remember { mutableStateOf(false) }
 
     // Dialog per invio email
     var showEmailDialog by remember { mutableStateOf(false) }
@@ -185,33 +199,62 @@ fun ProfessionalWifiScreen() {
         if (eventLogs.size > 100) eventLogs.removeAt(eventLogs.lastIndex)
     }
 
+    // Calcolo automatico certificazione PASS / FAIL
+    val lossPercent = if (totalPings > 0) (packetLossCount * 100.0 / totalPings) else 0.0
+    val signalPass = rssi >= -67
+    val lossPass = lossPercent < 1.5 && packetLossCount <= 2
+    val cloudPass = checkpointState.isReachable && itemOptixState.isReachable &&
+        (checkpointState.jitterMs ?: 0L) <= 35L && (itemOptixState.jitterMs ?: 0L) <= 35L
+    val isNetworkCertified = signalPass && lossPass && cloudPass
+
+    fun runDownloadSpeedTest() {
+        if (isTestingSpeed) return
+        isTestingSpeed = true
+        downloadMbps = "Test..."
+        addLog("Avvio Speed Test Download HTTP...")
+        coroutineScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                measureHttpDownloadMbps("https://speed.cloudflare.com/__down?bytes=5000000")
+            }
+            downloadMbps = if (result != null) String.format(Locale.US, "%.1f Mbps", result) else "Errore"
+            isTestingSpeed = false
+            addLog("Speed Test completato: $downloadMbps")
+        }
+    }
+
     fun buildReportBody(): String {
         val timestamp = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
         val bandLabel = if (freq == 0) "N/D" else if (freq < 3000) "2.4 GHz ($freq MHz)" else "5 GHz ($freq MHz)"
         val cpLat = if (checkpointState.isReachable && checkpointState.latencyMs != null) "${checkpointState.latencyMs} ms" else "OFFLINE"
         val cpJit = if (checkpointState.jitterMs != null) "${checkpointState.jitterMs} ms" else "--"
+        val cpDns = if (checkpointState.dnsMs != null) "${checkpointState.dnsMs} ms" else "--"
         val ioLat = if (itemOptixState.isReachable && itemOptixState.latencyMs != null) "${itemOptixState.latencyMs} ms" else "OFFLINE"
         val ioJit = if (itemOptixState.jitterMs != null) "${itemOptixState.jitterMs} ms" else "--"
+        val ioDns = if (itemOptixState.dnsMs != null) "${itemOptixState.dnsMs} ms" else "--"
+
+        val verdict = if (isNetworkCertified) "PASS - RETE IDONEA AL SERVIZIO" else "FAIL - CRITICITA' RILEVATE"
 
         val sb = StringBuilder()
-        sb.appendLine("REPORT DIAGNOSTICA WI-FI PUNTO VENDITA")
+        sb.appendLine("CERTIFICAZIONE RETE WI-FI PUNTO VENDITA")
+        sb.appendLine("Esito Globale: $verdict")
         sb.appendLine("Data e ora rilievo: $timestamp")
         sb.appendLine()
-        sb.appendLine("1. CONNESSIONE E SEGNALE ATTIVO")
+        sb.appendLine("1. APPARATO E CONNESSIONE ATTIVA")
         sb.appendLine("- SSID utilizzato: $ssid")
-        sb.appendLine("- Access Point (BSSID): $bssid")
-        sb.appendLine("- Intensità segnale (RSSI): $rssi dBm")
+        sb.appendLine("- Access Point (BSSID): $bssid ($apVendor)")
+        sb.appendLine("- Standard negoziato: $wifiStandard")
+        sb.appendLine("- Intensita' segnale (RSSI): $rssi dBm (Soglia min: -67 dBm -> ${if (signalPass) "OK" else "INSUFFICIENTE"})")
         sb.appendLine("- Canale / Banda: Ch ${freqToChannel(freq)} - $bandLabel")
-        sb.appendLine("- Velocità Link: $linkSpeed Mbps")
+        sb.appendLine("- Velocita' Link / Download Reale: $linkSpeed Mbps / $downloadMbps")
         sb.appendLine()
-        sb.appendLine("2. ROAMING E STABILITÀ RETE LOCALE")
+        sb.appendLine("2. ROAMING E STABILITA' RETE LOCALE")
         sb.appendLine("- Roaming effettuati (cambi AP): $roamingCount")
         sb.appendLine("- Ping Gateway ($gatewayIp): $pingMs")
-        sb.appendLine("- Pacchetti persi: $packetLossCount")
+        sb.appendLine("- Pacchetti persi: $packetLossCount su $totalPings (${String.format(Locale.US, "%.1f", lossPercent)}%)")
         sb.appendLine()
-        sb.appendLine("3. PRESTAZIONI SERVIZI CLOUD (LATENZA E JITTER)")
-        sb.appendLine("- *.checkpointsystems.com (IO Portal - ${checkpointState.activeHost}): Latenza $cpLat | Jitter $cpJit")
-        sb.appendLine("- *.itemoptix.com (IO Portal / IO Mobile - ${itemOptixState.activeHost}): Latenza $ioLat | Jitter $ioJit")
+        sb.appendLine("3. PRESTAZIONI SERVIZI CLOUD (LATENZA, JITTER, DNS)")
+        sb.appendLine("- *.checkpointsystems.com (${checkpointState.activeHost}): Latenza $cpLat | Jitter $cpJit | DNS $cpDns")
+        sb.appendLine("- *.itemoptix.com (${itemOptixState.activeHost}): Latenza $ioLat | Jitter $ioJit | DNS $ioDns")
         sb.appendLine()
         sb.appendLine("4. ANALISI SOVRAPPOSIZIONE CANALI")
         if (channelWarnings.isEmpty()) {
@@ -230,7 +273,8 @@ fun ProfessionalWifiScreen() {
     }
 
     fun sendEmailReport(targetEmail: String) {
-        val subject = "Report Diagnostica Wi-Fi Negozio - SSID: $ssid"
+        val verdictTag = if (isNetworkCertified) "PASS" else "FAIL"
+        val subject = "[$verdictTag] Certificazione Wi-Fi Negozio - SSID: $ssid"
         val body = buildReportBody()
         val intent = Intent(Intent.ACTION_SENDTO).apply {
             data = Uri.parse("mailto:")
@@ -247,7 +291,7 @@ fun ProfessionalWifiScreen() {
         }
     }
 
-    // 1. Monitoraggio Roaming e Cadute (con conteggio Roaming)
+    // 1. Monitoraggio Roaming e Cadute
     DisposableEffect(Unit) {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         var lastBssid: String? = null
@@ -294,7 +338,7 @@ fun ProfessionalWifiScreen() {
         onDispose { cm.unregisterNetworkCallback(callback) }
     }
 
-    // 2. Polling Live Segnale + Ping Gateway + Latenza/Jitter Checkpoint & ItemOptix
+    // 2. Polling Live Segnale + Ping Gateway + Latenza/Jitter/DNS Cloud
     LaunchedEffect(gatewayIp) {
         val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -326,6 +370,8 @@ fun ProfessionalWifiScreen() {
                 val rawSsid = info.ssid?.removePrefix("\"")?.removeSuffix("\"") ?: ""
                 ssid = if (rawSsid.isBlank() || rawSsid == "<unknown ssid>") "Wi-Fi Connesso (SSID Nascosto)" else rawSsid
                 bssid = info.bssid ?: "N/D"
+                apVendor = lookupApVendor(bssid)
+                wifiStandard = getWifiStandardLabel(info)
                 rssi = info.rssi
                 freq = info.frequency
                 linkSpeed = info.linkSpeed
@@ -343,6 +389,7 @@ fun ProfessionalWifiScreen() {
                     val reachable = InetAddress.getByName(gatewayIp).isReachable(400)
                     val elapsed = System.currentTimeMillis() - start
                     withContext(Dispatchers.Main) {
+                        totalPings++
                         if (reachable) {
                             pingMs = "${elapsed} ms"
                         } else {
@@ -352,21 +399,25 @@ fun ProfessionalWifiScreen() {
                         }
                     }
                 } catch (e: Exception) {
-                    withContext(Dispatchers.Main) { pingMs = "ERR" }
+                    withContext(Dispatchers.Main) {
+                        totalPings++
+                        pingMs = "ERR"
+                    }
                 }
             }
 
-            // Probe Cloud Checkpoint & ItemOptix ogni 1000ms
+            // Probe Cloud Checkpoint & ItemOptix (DNS + TCP RTT + Jitter) ogni 1000ms
             if (cycle % 2 == 0) {
                 val cpResult = withContext(Dispatchers.IO) { probeDomainCandidates(checkpointState.hosts) }
                 if (cpResult != null) {
-                    val (resolvedHost, rtt) = cpResult
+                    val (resolvedHost, rtt, dnsTime) = cpResult
                     cpSamples.addLast(rtt)
                     if (cpSamples.size > 15) cpSamples.removeFirst()
                     checkpointState = checkpointState.copy(
                         activeHost = resolvedHost,
                         latencyMs = rtt,
                         jitterMs = calculateJitter(cpSamples),
+                        dnsMs = dnsTime,
                         isReachable = true
                     )
                 } else {
@@ -375,13 +426,14 @@ fun ProfessionalWifiScreen() {
 
                 val ioResult = withContext(Dispatchers.IO) { probeDomainCandidates(itemOptixState.hosts) }
                 if (ioResult != null) {
-                    val (resolvedHost, rtt) = ioResult
+                    val (resolvedHost, rtt, dnsTime) = ioResult
                     ioSamples.addLast(rtt)
                     if (ioSamples.size > 15) ioSamples.removeFirst()
                     itemOptixState = itemOptixState.copy(
                         activeHost = resolvedHost,
                         latencyMs = rtt,
                         jitterMs = calculateJitter(ioSamples),
+                        dnsMs = dnsTime,
                         isReachable = true
                     )
                 } else {
@@ -444,7 +496,7 @@ fun ProfessionalWifiScreen() {
 
     val statusColor by animateColorAsState(
         targetValue = when {
-            rssi >= -65 -> StatusGreen
+            rssi >= -67 -> StatusGreen
             rssi >= -75 -> StatusAmber
             else -> StatusRed
         },
@@ -453,23 +505,22 @@ fun ProfessionalWifiScreen() {
 
     val qualityLabel = when {
         rssi >= -55 -> "SEGNALE ECCELLENTE"
-        rssi >= -65 -> "BUONA COPERTURA POS"
+        rssi >= -67 -> "CERTIFICATO PER POS/RFID"
         rssi >= -75 -> "SEGNALE DEBOLE"
         else -> "ZONA D'OMBRA CRITICA"
     }
 
-    // Finestra di dialogo per inserire l'email destinatario
     if (showEmailDialog) {
         AlertDialog(
             onDismissRequest = { showEmailDialog = false },
             containerColor = CardDark,
             title = {
-                Text("Invia Report Test Wi-Fi", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Text("Invia Certificazione Wi-Fi", color = TextPrimary, fontWeight = FontWeight.Bold)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        "Inserisci l'indirizzo email a cui inviare tutti i dati raccolti nel negozio:",
+                        "Inserisci l'indirizzo email a cui inviare il report di collaudo del negozio:",
                         color = TextSecondary,
                         fontSize = 13.sp
                     )
@@ -509,7 +560,7 @@ fun ProfessionalWifiScreen() {
         verticalArrangement = Arrangement.spacedBy(14.dp),
         contentPadding = PaddingValues(top = 18.dp, bottom = 28.dp)
     ) {
-        // Header Top con SSID in evidenza
+        // Header Top con SSID + Standard Wi-Fi
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -517,7 +568,7 @@ fun ProfessionalWifiScreen() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("SSID CONNESSO IN USO", color = AccentBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                    Text("SSID CONNESSO • $wifiStandard", color = AccentBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                     Text(ssid, color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
                 }
                 Spacer(Modifier.width(8.dp))
@@ -537,7 +588,28 @@ fun ProfessionalWifiScreen() {
             }
         }
 
-        // Tachimetro RSSI + Grafico Storico
+        // Banner Esito Certificazione PASS / FAIL
+        item {
+            val certColor = if (isNetworkCertified) StatusGreen else StatusRed
+            val certTitle = if (isNetworkCertified) "CERTIFICAZIONE: PASS (RETE IDONEA)" else "CERTIFICAZIONE: FAIL (VERIFICARE SOGLIE)"
+            val certDetail = "Segnale: ${if (signalPass) "OK" else "Basso"} | Perdita: ${String.format(Locale.US, "%.1f", lossPercent)}% | Cloud: ${if (cloudPass) "OK" else "Instabile"}"
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(certColor.copy(alpha = 0.14f))
+                    .border(1.dp, certColor.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+            ) {
+                Column {
+                    Text(certTitle, color = certColor, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
+                    Spacer(Modifier.height(2.dp))
+                    Text(certDetail, color = TextPrimary, fontSize = 11.sp)
+                }
+            }
+        }
+
+        // Tachimetro RSSI + Produttore AP + Grafico Storico
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = CardDark),
@@ -553,7 +625,7 @@ fun ProfessionalWifiScreen() {
                     SignalGauge(rssi = rssi, color = statusColor, label = qualityLabel)
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "SSID: $ssid  •  AP: $bssid",
+                        "AP: $bssid ($apVendor)",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace
@@ -566,7 +638,7 @@ fun ProfessionalWifiScreen() {
             }
         }
 
-        // Griglia KPI (Roaming + Rete Locale)
+        // Griglia KPI (Roaming + Rete Locale + Speed Test)
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -588,26 +660,26 @@ fun ProfessionalWifiScreen() {
                     KpiTile(
                         title = "PING GATEWAY",
                         value = pingMs,
-                        subtitle = gatewayIp,
-                        valueColor = if (pingMs == "TIMEOUT") StatusRed else StatusGreen,
+                        subtitle = "Persi: $packetLossCount/$totalPings",
+                        valueColor = if (pingMs == "TIMEOUT" || packetLossCount > 0) StatusRed else StatusGreen,
                         modifier = Modifier.weight(1f)
                     )
                     KpiTile(
-                        title = "LINK / PERSI",
-                        value = "$linkSpeed Mbps",
-                        subtitle = "Pacchetti persi: $packetLossCount",
-                        valueColor = if (packetLossCount > 0) StatusRed else TextPrimary,
+                        title = "LINK / DOWNLOAD",
+                        value = downloadMbps,
+                        subtitle = "Link AP: $linkSpeed Mbps",
+                        valueColor = AccentBlue,
                         modifier = Modifier.weight(1f)
                     )
                 }
             }
         }
 
-        // Sezione Ping Domini Cloud (Checkpoint & ItemOptix)
+        // Sezione Ping Domini Cloud (Checkpoint & ItemOptix con DNS)
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "LATENZA & JITTER SERVIZI CLOUD",
+                    "LATENZA, JITTER & DNS SERVIZI CLOUD",
                     color = TextSecondary,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -618,9 +690,23 @@ fun ProfessionalWifiScreen() {
             }
         }
 
-        // Pulsanti Azione: Scansione Spettro + Invio Report Email
+        // Pulsanti Azione: Speed Test + Scansione Spettro + Invio Report Email
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { runDownloadSpeedTest() },
+                    enabled = !isTestingSpeed,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                ) {
+                    Text(
+                        if (isTestingSpeed) "SPEED TEST IN CORSO..." else "ESEGUI SPEED TEST DOWNLOAD REALE",
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp
+                    )
+                }
+
                 Button(
                     onClick = { runChannelScan() },
                     enabled = !isScanning,
@@ -642,7 +728,7 @@ fun ProfessionalWifiScreen() {
                     modifier = Modifier.fillMaxWidth().height(50.dp)
                 ) {
                     Text(
-                        "INVIA REPORT TEST VIA EMAIL",
+                        "INVIA CERTIFICAZIONE VIA EMAIL",
                         fontWeight = FontWeight.ExtraBold,
                         letterSpacing = 0.8.sp
                     )
@@ -707,7 +793,7 @@ fun ProfessionalWifiScreen() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("LOG ROAMING ($roamingCount) & EVENTI", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-                TextButton(onClick = { eventLogs.clear(); packetLossCount = 0; roamingCount = 0 }) {
+                TextButton(onClick = { eventLogs.clear(); packetLossCount = 0; totalPings = 0; roamingCount = 0 }) {
                     Text("AZZERA", color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
@@ -756,7 +842,7 @@ fun EndpointProbeCard(state: EndpointProbeState) {
     val jitterColor = when {
         state.jitterMs == null -> TextSecondary
         state.jitterMs <= 15 -> StatusGreen
-        state.jitterMs <= 40 -> StatusAmber
+        state.jitterMs <= 35 -> StatusAmber
         else -> StatusRed
     }
 
@@ -776,15 +862,16 @@ fun EndpointProbeCard(state: EndpointProbeState) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(state.title, color = AccentBlue, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     Text(state.subtitle, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                    Text("Host: ${state.activeHost}", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    val dnsLabel = if (state.dnsMs != null) " • DNS: ${state.dnsMs}ms" else ""
+                    Text("Host: ${state.activeHost}$dnsLabel", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(horizontalAlignment = Alignment.End) {
                         Text("LATENZA", color = TextSecondary, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                         Text(
                             if (state.isReachable && state.latencyMs != null) "${state.latencyMs} ms" else "OFFLINE",
                             color = latencyColor,
-                            fontSize = 16.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.ExtraBold,
                             fontFamily = FontFamily.Monospace
                         )
@@ -794,7 +881,7 @@ fun EndpointProbeCard(state: EndpointProbeState) {
                         Text(
                             if (state.jitterMs != null) "${state.jitterMs} ms" else "--",
                             color = jitterColor,
-                            fontSize = 16.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.ExtraBold,
                             fontFamily = FontFamily.Monospace
                         )
@@ -805,21 +892,51 @@ fun EndpointProbeCard(state: EndpointProbeState) {
     }
 }
 
-fun probeDomainCandidates(candidates: List<String>): Pair<String, Long>? {
+fun probeDomainCandidates(candidates: List<String>): Triple<String, Long, Long>? {
     for (host in candidates) {
-        val rtt = measureTcpRtt(host, 443, 1200)
-        if (rtt != null) return Pair(host, rtt)
+        val result = measureDnsAndTcpRtt(host, 443, 1200)
+        if (result != null) return Triple(host, result.first, result.second)
     }
     return null
 }
 
-fun measureTcpRtt(host: String, port: Int, timeoutMs: Int): Long? {
+fun measureDnsAndTcpRtt(host: String, port: Int, timeoutMs: Int): Pair<Long, Long>? {
     return try {
+        val dnsStart = System.nanoTime()
+        val address = InetAddress.getByName(host)
+        val dnsMs = (System.nanoTime() - dnsStart) / 1_000_000L
+
         Socket().use { socket ->
-            val start = System.nanoTime()
-            socket.connect(InetSocketAddress(host, port), timeoutMs)
-            (System.nanoTime() - start) / 1_000_000L
+            val tcpStart = System.nanoTime()
+            socket.connect(InetSocketAddress(address, port), timeoutMs)
+            val tcpMs = (System.nanoTime() - tcpStart) / 1_000_000L
+            Pair(tcpMs, dnsMs)
         }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+fun measureHttpDownloadMbps(urlString: String): Double? {
+    return try {
+        val url = URL(urlString)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 4000
+            readTimeout = 6000
+            requestMethod = "GET"
+        }
+        val start = System.nanoTime()
+        var totalBytes = 0L
+        conn.inputStream.use { input ->
+            val buffer = ByteArray(8192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                totalBytes += read
+            }
+        }
+        val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0
+        if (elapsedSec <= 0.0 || totalBytes == 0L) null else (totalBytes * 8.0) / (elapsedSec * 1_000_000.0)
     } catch (e: Exception) {
         null
     }
@@ -833,6 +950,33 @@ fun calculateJitter(samples: ArrayDeque<Long>): Long {
         diffSum += abs(list[i] - list[i - 1])
     }
     return diffSum / (list.size - 1)
+}
+
+fun getWifiStandardLabel(info: WifiInfo): String {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        return when (info.wifiStandard) {
+            ScanResult.WIFI_STANDARD_LEGACY -> "Wi-Fi 1/2/3"
+            ScanResult.WIFI_STANDARD_11N -> "Wi-Fi 4 (802.11n)"
+            ScanResult.WIFI_STANDARD_11AC -> "Wi-Fi 5 (802.11ac)"
+            ScanResult.WIFI_STANDARD_11AX -> "Wi-Fi 6 (802.11ax)"
+            ScanResult.WIFI_STANDARD_11BE -> "Wi-Fi 7 (802.11be)"
+            else -> "Wi-Fi"
+        }
+    }
+    return "Wi-Fi"
+}
+
+fun lookupApVendor(bssid: String): String {
+    val prefix = bssid.uppercase(Locale.US).take(8)
+    return when {
+        prefix.startsWith("00:18:0A") || prefix.startsWith("AC:17:C8") || prefix.startsWith("E0:55:3D") || prefix.startsWith("88:15:44") -> "Cisco Meraki"
+        prefix.startsWith("00:1A:1E") || prefix.startsWith("24:DE:C6") || prefix.startsWith("9C:1C:12") || prefix.startsWith("D8:C7:C8") -> "HPE Aruba"
+        prefix.startsWith("74:83:C2") || prefix.startsWith("F0:9F:C2") || prefix.startsWith("18:E8:29") || prefix.startsWith("78:8A:20") -> "Ubiquiti UniFi"
+        prefix.startsWith("00:09:0F") || prefix.startsWith("90:6C:AC") || prefix.startsWith("70:4C:A5") -> "Fortinet"
+        prefix.startsWith("00:24:A5") || prefix.startsWith("2C:3E:CF") || prefix.startsWith("68:BC:0C") -> "Cisco"
+        prefix.startsWith("B0:95:75") || prefix.startsWith("50:C7:BF") -> "TP-Link"
+        else -> "Enterprise AP"
+    }
 }
 
 @Composable
